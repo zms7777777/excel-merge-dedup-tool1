@@ -25,7 +25,10 @@ import argparse
 import os
 import sys
 import glob
+import re
 import pandas as pd
+
+_FORMULA_PREFIXES = re.compile(r'^[=+\-@\t\r]')
 
 
 def find_tables(input_dir):
@@ -47,20 +50,30 @@ def read_one(path):
         for enc in ("utf-8-sig", "gbk", "utf-8"):
             try:
                 return pd.read_csv(path, dtype=str, encoding=enc, keep_default_na=False)
-            except (UnicodeDecodeError, Exception):
+            except UnicodeDecodeError:
                 continue
         raise ValueError(f"无法识别编码：{path}")
     else:
         return pd.read_excel(path, dtype=str, keep_default_na=False)
 
 
+def _sanitize_cell(value):
+    """Neutralise formula injection: prefix a leading formula character with a single quote."""
+    if isinstance(value, str) and _FORMULA_PREFIXES.match(value):
+        return "'" + value
+    return value
+
+
 def clean_frame(df):
-    """基础清洗：列名和单元格去首尾空格，删除完全空白的行。"""
+    """基础清洗：列名和单元格去首尾空格，删除完全空白的行，防止公式注入。"""
     df.columns = [str(c).strip() for c in df.columns]
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
     # 删除所有列都为空的行
     df = df[~(df.apply(lambda r: all(v == "" or v == "nan" for v in r), axis=1))]
+    # Sanitise cell values to prevent Excel formula injection
+    for col in df.columns:
+        df[col] = df[col].map(_sanitize_cell)
     return df
 
 
@@ -74,11 +87,17 @@ def main():
                     help="重复时保留第一条还是最后一条")
     args = ap.parse_args()
 
-    if not os.path.isdir(args.input):
-        print(f"[错误] 目录不存在：{args.input}")
+    input_dir = os.path.realpath(args.input)
+    if not os.path.isdir(input_dir):
+        print(f"[错误] 目录不存在：{input_dir}")
         sys.exit(1)
 
-    files = find_tables(args.input)
+    output_path = os.path.realpath(args.output)
+    if os.path.isdir(output_path):
+        print(f"[错误] 输出路径是一个目录：{output_path}")
+        sys.exit(1)
+
+    files = find_tables(input_dir)
     if not files:
         print(f"[错误] {args.input} 里没找到 xlsx/xls/csv 文件")
         sys.exit(1)
