@@ -24,44 +24,16 @@ Excel 批量合并去重清洗工具 (Excel Batch Merge / De-dup / Clean)
 import argparse
 import os
 import sys
-import glob
+
 import pandas as pd
 
-
-def find_tables(input_dir):
-    """收集目录下所有表格文件路径。"""
-    exts = ("*.xlsx", "*.xls", "*.csv")
-    files = []
-    for e in exts:
-        files.extend(glob.glob(os.path.join(input_dir, e)))
-    # 排除临时文件（Excel 打开时生成的 ~$ 前缀文件）和自己的输出文件
-    files = [f for f in files if not os.path.basename(f).startswith("~$")]
-    return sorted(files)
-
-
-def read_one(path):
-    """读单个文件为 DataFrame，全部按字符串读，避免手机号被转成科学计数法。"""
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".csv":
-        # 依次尝试常见中文编码
-        for enc in ("utf-8-sig", "gbk", "utf-8"):
-            try:
-                return pd.read_csv(path, dtype=str, encoding=enc, keep_default_na=False)
-            except (UnicodeDecodeError, Exception):
-                continue
-        raise ValueError(f"无法识别编码：{path}")
-    else:
-        return pd.read_excel(path, dtype=str, keep_default_na=False)
-
-
-def clean_frame(df):
-    """基础清洗：列名和单元格去首尾空格，删除完全空白的行。"""
-    df.columns = [str(c).strip() for c in df.columns]
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-    # 删除所有列都为空的行
-    df = df[~(df.apply(lambda r: all(v == "" or v == "nan" for v in r), axis=1))]
-    return df
+from excel_utils import (
+    SOURCE_COLUMN,
+    clean_frame,
+    find_tables,
+    read_table,
+    save_sheets,
+)
 
 
 def main():
@@ -86,15 +58,16 @@ def main():
     print(f"发现 {len(files)} 个文件，开始合并……")
     frames, report_rows = [], []
     for f in files:
+        name = os.path.basename(f)
         try:
-            df = clean_frame(read_one(f))
-            df["_来源文件"] = os.path.basename(f)
+            df = clean_frame(read_table(f))
+            df[SOURCE_COLUMN] = name
             frames.append(df)
-            report_rows.append({"来源文件": os.path.basename(f), "读取行数": len(df)})
-            print(f"  [OK] {os.path.basename(f)}  {len(df)} 行")
+            report_rows.append({"来源文件": name, "读取行数": len(df)})
+            print(f"  [OK] {name}  {len(df)} 行")
         except Exception as e:
-            print(f"  [X]  {os.path.basename(f)}  读取失败：{e}")
-            report_rows.append({"来源文件": os.path.basename(f), "读取行数": f"失败:{e}"})
+            print(f"  [X]  {name}  读取失败：{e}")
+            report_rows.append({"来源文件": name, "读取行数": f"失败:{e}"})
 
     if not frames:
         print("[错误] 没有任何文件成功读取")
@@ -106,7 +79,7 @@ def main():
     # 去重
     removed = 0
     if args.dedup_all:
-        content_cols = [c for c in merged.columns if c != "_来源文件"]
+        content_cols = [c for c in merged.columns if c != SOURCE_COLUMN]
         merged = merged.drop_duplicates(subset=content_cols, keep=args.keep)
         removed = total_before - len(merged)
         print(f"整行去重：删除 {removed} 条重复")
@@ -131,10 +104,11 @@ def main():
     ])
 
     # 写出多 sheet 结果
-    with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
-        merged.to_excel(writer, sheet_name="合并结果", index=False)
-        summary.to_excel(writer, sheet_name="处理报告", index=False, startrow=0)
-        report.to_excel(writer, sheet_name="处理报告", index=False, startrow=len(summary) + 2)
+    save_sheets(args.output, [
+        (merged, "合并结果"),
+        (summary, "处理报告", 0),
+        (report, "处理报告", len(summary) + 2),
+    ])
 
     print(f"\n完成 → {args.output}")
     print(f"最终 {len(merged)} 行（原 {total_before} 行，去重删 {removed} 行）")
