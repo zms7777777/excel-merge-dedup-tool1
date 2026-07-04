@@ -43,13 +43,19 @@ def read_one(path):
     """读单个文件为 DataFrame，全部按字符串读，避免手机号被转成科学计数法。"""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
-        # 依次尝试常见中文编码
+        # 依次尝试常见中文编码。只有确实是“编码/解码”问题时才换下一个编码；
+        # 其它错误（文件损坏、空文件、权限不足等）直接向上抛出，
+        # 避免被误吞并误报成“无法识别编码”，从而掩盖真正的失败原因。
+        last_decode_error = None
         for enc in ("utf-8-sig", "gbk", "utf-8"):
             try:
                 return pd.read_csv(path, dtype=str, encoding=enc, keep_default_na=False)
-            except (UnicodeDecodeError, Exception):
+            except UnicodeDecodeError as e:
+                last_decode_error = e
                 continue
-        raise ValueError(f"无法识别编码：{path}")
+        raise ValueError(
+            f"无法识别编码（已尝试 utf-8-sig/gbk/utf-8）：{path}"
+        ) from last_decode_error
     else:
         return pd.read_excel(path, dtype=str, keep_default_na=False)
 
@@ -131,10 +137,17 @@ def main():
     ])
 
     # 写出多 sheet 结果
-    with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
-        merged.to_excel(writer, sheet_name="合并结果", index=False)
-        summary.to_excel(writer, sheet_name="处理报告", index=False, startrow=0)
-        report.to_excel(writer, sheet_name="处理报告", index=False, startrow=len(summary) + 2)
+    try:
+        with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
+            merged.to_excel(writer, sheet_name="合并结果", index=False)
+            summary.to_excel(writer, sheet_name="处理报告", index=False, startrow=0)
+            report.to_excel(writer, sheet_name="处理报告", index=False, startrow=len(summary) + 2)
+    except PermissionError:
+        print(f"[错误] 无法写入 {args.output}，请先关闭已打开的同名文件后重试")
+        sys.exit(1)
+    except OSError as e:
+        print(f"[错误] 写入 {args.output} 失败：{e}")
+        sys.exit(1)
 
     print(f"\n完成 → {args.output}")
     print(f"最终 {len(merged)} 行（原 {total_before} 行，去重删 {removed} 行）")
